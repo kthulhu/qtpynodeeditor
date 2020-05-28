@@ -85,12 +85,6 @@ class Connection(QObject, Serializable, ConnectionBase):
             self._graphics_object._cleanup()
             self._graphics_object = None
 
-    def __del__(self):
-        try:
-            self._cleanup()
-        except Exception:
-            ...
-
     @property
     def style(self) -> StyleCollection:
         return self._style
@@ -368,9 +362,12 @@ class Connection(QObject, Serializable, ConnectionBase):
         return self._ports[PortType.input].node
 
     @property
-    def output(self) -> Node:
+    def output_node(self) -> Node:
         'Output node'
         return self._ports[PortType.output].node
+
+    # For backward-compatibility:
+    output = output_node
 
     def propagate_empty_data(self):
         self.propagate_data(None)

@@ -2,9 +2,10 @@ import contextlib
 import json
 import os
 
-from qtpy.QtCore import QDir, QObject, QPoint, QPointF, Qt, Signal
+from qtpy.QtCore import QDir, QPoint, QPointF, Qt, Signal
 from qtpy.QtWidgets import QFileDialog, QGraphicsScene
 
+from . import exceptions
 from . import style as style_module
 from .connection import Connection
 from .connection_graphics_object import ConnectionGraphicsObject
@@ -24,9 +25,25 @@ def locate_node_at(scene_point, scene, view_transform):
     return filtered_items[0].node if filtered_items else None
 
 
-class _FlowSceneModel:
-    def __init__(self, registry=None):
-        super().__init__()
+class FlowSceneModel:
+    '''
+    A model representing a flow scene
+
+    Emits the following signals upon connection/node creation/deletion::
+
+        connection_created : Signal(Connection)
+        connection_deleted : Signal(Connection)
+        node_created : Signal(Node)
+        node_deleted : Signal(Node)
+    '''
+    connection_created = Signal(Connection)
+    connection_deleted = Signal(Connection)
+
+    node_created = Signal(Node)
+    node_deleted = Signal(Node)
+
+    def __init__(self, registry=None, **kwargs):
+        super().__init__(**kwargs)
         self._connections = []
         self._nodes = {}
 
@@ -358,32 +375,7 @@ class _FlowSceneModel:
             connection._cleanup()
 
 
-class FlowSceneModel(QObject):
-    '''
-    A model representing a flow scene
-
-    Emits the following signals upon connection/node creation/deletion::
-
-        connection_created : Signal(Connection)
-        connection_deleted : Signal(Connection)
-        node_created : Signal(Node)
-        node_deleted : Signal(Node)
-    '''
-    connection_created = Signal(Connection)
-    connection_deleted = Signal(Connection)
-
-    node_created = Signal(Node)
-    node_deleted = Signal(Node)
-
-
-class FlowScene(QGraphicsScene, _FlowSceneModel):
-    # Implement the FlowSceneModel signals:
-    connection_created = Signal(Connection)
-    connection_deleted = Signal(Connection)
-    node_created = Signal(Node)
-    node_deleted = Signal(Node)
-    # End of re-implemented signals
-
+class FlowScene(FlowSceneModel, QGraphicsScene):
     connection_hover_left = Signal(Connection)
     connection_hovered = Signal(Connection, QPoint)
 
@@ -409,11 +401,8 @@ class FlowScene(QGraphicsScene, _FlowSceneModel):
         style : StyleCollection, optional
         parent : QObject, optional
         '''
-        # Note: PySide2 does not support a cooperative __init__, meaning we
-        # cannot use super().__init__ here.
-        # super().__init__(registry=registry, parent=parent)
-        QGraphicsScene.__init__(self, parent=parent)
-        _FlowSceneModel.__init__(self, registry=registry)
+        super().__init__(parent=parent)
+        self._registry = registry or self._registry
 
         if style is None:
             style = style_module.default_style
@@ -426,12 +415,6 @@ class FlowScene(QGraphicsScene, _FlowSceneModel):
 
     def _cleanup(self):
         self.clear_scene()
-
-    def __del__(self):
-        try:
-            self._cleanup()
-        except Exception:
-            ...
 
     @property
     def allow_node_creation(self):
@@ -458,7 +441,8 @@ class FlowScene(QGraphicsScene, _FlowSceneModel):
         return locate_node_at(point, self, transform)
 
     def create_connection(self, port_a: Port, port_b: Port = None, *,
-                          converter: TypeConverter = None) -> Connection:
+                          converter: TypeConverter = None,
+                          check_cycles=True) -> Connection:
         """
         Create a connection
 
@@ -470,16 +454,36 @@ class FlowScene(QGraphicsScene, _FlowSceneModel):
             The second port, opposite of the type of port_a
         converter : TypeConverter, optional
             The type converter to use for data propagation
+        check_cycles : bool, optional
+            Ensures that creating the connection would not introduce a cycle
 
         Returns
         -------
         value : Connection
+
+        Raises
+        ------
+        NodeConnectionFailure
+            If it is not possible to create the connection
         """
         connection = Connection(port_a=port_a, port_b=port_b, style=self._style)
         if port_a is not None:
             port_a.add_connection(connection)
+
         if port_b is not None:
             port_b.add_connection(connection)
+
+        if port_a and port_b and check_cycles:
+            # In the case of a fully-specified connection, ensure adding the
+            # connection would not create a cycle in the graph.  For
+            # partially-specified connections (i.e., one port only), the
+            # validation happens in the NodeConnectionInteraction
+            node_a, node_b = port_a.node, port_b.node
+            if node_a.has_connection_by_port_type(node_b, port_b.port_type):
+                raise exceptions.ConnectionCycleFailure(
+                    f'Connecting {node_a} and {node_b} would introduce a '
+                    f'cycle in the graph'
+                )
 
         cgo = ConnectionGraphicsObject(self, connection)
         # after self function connection points are set to node port
